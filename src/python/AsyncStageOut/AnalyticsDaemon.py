@@ -173,6 +173,7 @@ class AnalyticsDaemon(BaseWorkerThread):
             doc['jobid'] = file['value']['jobid']
             doc['retry_count'] = file['value']['retry_count']
             doc['size'] = file['value']['size']
+            doc['state'] = file['value']['state']
 
             try:
                 self.monitoring_db.queue(doc, True)

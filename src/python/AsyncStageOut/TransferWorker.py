@@ -138,14 +138,17 @@ class TransferWorker:
         b. submits ftscp
         c. deletes successfully transferred files from the DB
         """
-
+        self.logger.debug("Getting files for transfer")
         jobs = self.files_for_transfer()
-
+        
+        self.logger.debug("Performing transfers")
         transferred, failed, failed_to_clean = self.command()
 
+        self.logger.debug("Marking transfers good/bad")
         self.mark_failed( failed )
         self.mark_good( transferred )
 
+        self.logger.debug("Cleaning Space")
         self.cleanSpace(failed_to_clean, True)
 
         self.logger.info('Transfers completed')
@@ -270,11 +273,14 @@ class TransferWorker:
         Process a queue of work per transfer source:destination for a user. Return one
         ftscp copyjob per source:destination.
         """
+        self.logger.debug("Getting source destinations by user")
         source_dests = self.source_destinations_by_user()
+        self.logger.debug("Got %s source_dests" % len(source_dests) )
         jobs = {}
         self.logger.info('%s has %s links to transfer on' % (self.user, len(source_dests)))
         try:
             for (source, destination) in source_dests:
+                self.logger.debug("Looking at %s->%s" % (source, destination))
                 # We could push applying the TFC into the list function, not sure if
                 # this would be faster, but might use up less memory. Probably more
                 # complicated, though.
@@ -298,8 +304,8 @@ class TransferWorker:
             self.logger.debug('ftscp input created for %s (%s jobs)' % (self.user, len(jobs.keys())))
 
             return jobs
-        except:
-            self.logger.exception("fail")
+        except Exception, e:
+            self.logger.exception("fail: %s" % e)
 
 
     def apply_tfc_to_lfn(self, file):
@@ -534,10 +540,12 @@ class TransferWorker:
             try:
                 document = self.db.document( docId )
             except Exception, ex:
-                msg =  "Error loading document from couch"
+                msg =  "Error loading document %s from couch\n" % docId
+                msg += "LFN was %s" % lfn
                 msg += str(ex)
                 msg += str(traceback.format_exc())
                 self.logger.error(msg)
+                continue
 
             # Prepare data to update the document in couch
             if force_fail or len(document['retry_count']) + 1 > self.max_retry:
