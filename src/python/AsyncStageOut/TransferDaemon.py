@@ -77,13 +77,19 @@ class TransferDaemon(BaseWorkerThread):
 
         site_tfc_map = {}
         for site in sites:
+            self.logger.info("Getting thing for site %s" % site)
             site_tfc_map[site] = self.get_tfc_rules(site)
 
         self.logger.debug('kicking off pool')
-
-        r = [self.pool.apply_async(ftscp, (u, site_tfc_map, self.config)) for u in users]
-        for result in r:
-            self.logger.info(result.get())
+        
+        if (False):
+            r = [self.pool.apply_async(ftscp, (u, site_tfc_map, self.config)) for u in users]
+            for result in r:
+                retval = result.get()
+                self.logger.info(retval)
+        else:
+            r = [apply(ftscp, (u, site_tfc_map, self.config)) for u in users]
+        
 
     def active_users(self, db):
         """

@@ -138,14 +138,17 @@ class TransferWorker:
         b. submits ftscp
         c. deletes successfully transferred files from the DB
         """
-
+        self.logger.debug("Getting files for transfer")
         jobs = self.files_for_transfer()
-
+        
+        self.logger.debug("Performing transfers")
         transferred, failed, failed_to_clean = self.command()
 
+        self.logger.debug("Marking transfers good/bad")
         self.mark_failed( failed )
         self.mark_good( transferred )
 
+        self.logger.debug("Cleaning Space")
         self.cleanSpace(failed_to_clean, True)
 
         self.logger.info('Transfers completed')
@@ -260,7 +263,7 @@ class TransferWorker:
         sites = self.db.loadView('AsyncTransfer', 'ftscp', query)
 
         def keys_map(dict):
-            return dict['key'][4], dict['key'][3]
+            return dict['key'][4], dict['key'][3], dict['key'][6]
 
         return map(keys_map, sites['rows'])
 
@@ -270,25 +273,34 @@ class TransferWorker:
         Process a queue of work per transfer source:destination for a user. Return one
         ftscp copyjob per source:destination.
         """
+        self.logger.debug("Getting source destinations by user")
         source_dests = self.source_destinations_by_user()
+        self.logger.debug("Got %s source_dests" % len(source_dests) )
         jobs = {}
         self.logger.info('%s has %s links to transfer on' % (self.user, len(source_dests)))
         try:
-            for (source, destination) in source_dests:
+            for (source, destination, preserveLFN) in source_dests:
+                self.logger.debug("Looking at %s->%s" % (source, destination))
                 # We could push applying the TFC into the list function, not sure if
                 # this would be faster, but might use up less memory. Probably more
                 # complicated, though.
                 query = {'reduce':False,
                      'limit': self.config.max_files_per_transfer,
-                     'key':[self.user, self.group, self.role, destination, source, self.userDN]}
+                     'key':[self.user, self.group, self.role, destination,
+                            source, self.userDN, preserveLFN]}
 
                 active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
                 self.logger.debug('%s has %s files to transfer from %s to %s' % (self.user, len(active_files), source, destination))
                 new_job = []
                 # take these active files and make a copyjob entry
                 def tfc_map(item):
+                    if item['key'][6] == False:
+                        # preserveLFN if off, so rewrite the dest URL
+                        destination_lfn = item['value'].replace('store/temp', 'store', 1)
+                    else:
+                        destination_lfn = item['value']
                     source_pfn = self.apply_tfc_to_lfn('%s:%s' % (source, item['value']))
-                    destination_pfn = self.apply_tfc_to_lfn('%s:%s' % (destination, item['value'].replace('store/temp', 'store', 1)))
+                    destination_pfn = self.apply_tfc_to_lfn('%s:%s' % (destination, destination_lfn))
 
                     new_job.append('%s %s' % (source_pfn, destination_pfn))
 
@@ -298,8 +310,8 @@ class TransferWorker:
             self.logger.debug('ftscp input created for %s (%s jobs)' % (self.user, len(jobs.keys())))
 
             return jobs
-        except:
-            self.logger.exception("fail")
+        except Exception, e:
+            self.logger.exception("fail: %s" % e)
 
 
     def apply_tfc_to_lfn(self, file):
@@ -491,13 +503,16 @@ class TransferWorker:
                 msg += str(traceback.format_exc())
                 self.logger.error(msg)
 
-            outputLfn = document['lfn'].replace('store/temp', 'store', 1)
+            if document.get('preserve_lfn', False) == False:
+                outputLfn = document['lfn'].replace('store/temp', 'store', 1)
+            else:
+                outputLfn = document['lfn']
 
             try:
                 data = {}
                 data['end_time'] = now
                 data['state'] = 'done'
-		data['lfn'] = outputLfn
+                data['lfn'] = outputLfn
                 data['last_update'] = last_update
                 updateUri = "/" + self.db.name + "/_design/AsyncTransfer/_update/updateJobs/" + getHashLfn(lfn)
                 updateUri += "?" + urllib.urlencode(data)
@@ -537,10 +552,12 @@ class TransferWorker:
             try:
                 document = self.db.document( docId )
             except Exception, ex:
-                msg =  "Error loading document from couch"
+                msg =  "Error loading document %s from couch\n" % docId
+                msg += "LFN was %s" % lfn
                 msg += str(ex)
                 msg += str(traceback.format_exc())
                 self.logger.error(msg)
+                continue
 
             # Prepare data to update the document in couch
             if force_fail or len(document['retry_count']) + 1 > self.max_retry:

@@ -154,10 +154,12 @@ class AnalyticsDaemon(BaseWorkerThread):
         """
         end_time = 0
         all_files = 0
-
+        
+        self.logger.debug("Updating job summaries for ASO")
         try:
             query = {}
-            since = self.monitoring_db.loadView('UserMonitoring', 'LastSummariesUpdate', query)['rows'][0]['key']
+            retval = self.monitoring_db.loadView('UserMonitoring', 'LastSummariesUpdate', query)
+            since = retval['rows'][0]['key']
             query = {'limit' : 1, 'descending': True}
             end_time = self.db.loadView('AsyncTransfer', 'LastUpdatePerFile', query)['rows'][0]['key']
         except IndexError:
@@ -170,19 +172,19 @@ class AnalyticsDaemon(BaseWorkerThread):
             self.logger.exception('A problem occured when contacting couchDB: %s' % e)
             return
 
+        self.logger.debug("Updating monitoring DB timestamp")
         updateUri = "/" + self.monitoring_db.name + "/_design/UserMonitoring/_update/lastDBUpdate/MONITORING_DB_UPDATE"
         updateUri += "?db_update=%d" % ( end_time + 1)
         self.monitoring_db.makeRequest(uri = updateUri, type = "PUT", decode = False)
 
         query = { 'startkey': since, 'endkey': end_time + 1 }
         all_files = self.db.loadView('AsyncTransfer', 'LastUpdatePerFile', query)['rows']
-
+        
+        self.logger.debug('Updating %s files in updateJobSummaries' % len(all_files))
         for file in all_files:
             doc = {}
             doc['type'] = 'aso_file'
             doc['workflow'] = file['value']['workflow']
-            doc['lfn'] = file['value']['lfn']
-            doc['state'] = file['value']['state']
             if file['value'].has_key('errors'):
                 doc['errors'] = file['value']['errors']
             doc['location'] = file['value']['location']
@@ -190,6 +192,15 @@ class AnalyticsDaemon(BaseWorkerThread):
             doc['jobid'] = file['value']['jobid']
             doc['retry_count'] = file['value']['retry_count']
             doc['size'] = file['value']['size']
+            doc['state'] = file['value']['state']
+            doc['preserve_lfn'] = file['value']['preserve_lfn']
+            if doc['preserve_lfn'] == False:
+                doc['lfn'] = file['value']['lfn'].replace('store/temp','store',1)
+            else:
+                doc['lfn'] = file['value']['lfn']
+
+
+
             try:
                 self.monitoring_db.queue(doc, True)
             except Exception, ex:
