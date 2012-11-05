@@ -11,8 +11,10 @@ import unittest
 import time
 import threading
 import subprocess
+import urllib
 
 from AsyncStageOut.TransferDaemon import TransferDaemon
+from AsyncStageOut.PublisherDaemon import PublisherDaemon
 from AsyncStageOut.LFNSourceDuplicator import LFNSourceDuplicator
 from AsyncStageOut.TransferWorker import TransferWorker
 from AsyncStageOut.AnalyticsDaemon import AnalyticsDaemon
@@ -75,12 +77,14 @@ class AsyncTransfer_t(unittest.TestCase):
         self.testInit.setupCouch("agent_database", "Agent")
         couchapps = "../../../src/couchapp"
         self.async_couchapp = "%s/AsyncTransfer" % couchapps
+        self.publication_couchapp = "%s/DBSPublisher" % couchapps
         self.monitor_couchapp = "%s/monitor" % couchapps
         self.user_monitoring_couchapp = "%s/UserMonitoring" % couchapps
         self.stat_couchapp = "%s/stat" % couchapps
         harness = CouchAppTestHarness("asynctransfer")
         harness.create()
         harness.pushCouchapps(self.async_couchapp)
+        harness.pushCouchapps(self.publication_couchapp)
         harness.pushCouchapps(self.monitor_couchapp)
         harness_user_mon = CouchAppTestHarness("user_monitoring_asynctransfer")
         harness_user_mon.create()
@@ -160,6 +164,17 @@ class AsyncTransfer_t(unittest.TestCase):
         config.AsyncTransfer.pluginDir = "AsyncStageOut.Plugins"
         config.AsyncTransfer.serviceCert = os.getenv('X509_USER_PROXY')
         config.AsyncTransfer.componentDir = self.testInit.generateWorkDir(config)
+        config.DBSPublisher.pollInterval = 10
+        config.DBSPublisher.publication_pool_size = 1
+        config.DBSPublisher.componentDir = self.testInit.generateWorkDir(config)
+        config.DBSPublisher.namespace = 'AsyncStageOut.DBSPublisher'
+        config.DBSPublisher.log_level = logging.DEBUG
+        config.DBSPublisher.files_database = "asynctransfer_1"
+        config.DBSPublisher.couch_instance = os.getenv("COUCHURL")
+        config.DBSPublisher.publication_max_retry = 0
+        config.DBSPublisher.serviceCert = os.getenv('X509_USER_PROXY')
+        config.DBSPublisher.max_files_per_block = 100
+        config.DBSPublisher.workflow_expiration_time = 3
 
         return config
 
@@ -195,7 +210,6 @@ class AsyncTransfer_t(unittest.TestCase):
         """
         doc = {}
         doc['dn'] = "/C=IT/O=INFN/OU=Personal Certificate/L=Perugia/CN=Hassen Riahi"
-        doc['workflow'] = 'someWorkflow'
         doc['jobid'] = '1'
         doc['retry_count'] = []
         doc['source'] = random.choice(self.sites)
@@ -212,7 +226,7 @@ class AsyncTransfer_t(unittest.TestCase):
         doc['checksums'] = 'someChecksums'
         doc['start_time'] = str(datetime.datetime.now())
         doc['end_time'] = str(datetime.datetime.now())
-        doc['dbSource_update'] = str(time.time())
+        doc['job_end_time'] = str(time.time())
         doc['dbSource_url'] = 'someUrl'
         self.db.queue(doc, True)
         self.db.commit()
@@ -237,18 +251,19 @@ class AsyncTransfer_t(unittest.TestCase):
         doc['group'] = 'someGroup'
         doc['role'] = 'someRole'
         doc['state'] = state
-        doc['workflow'] = 'someWorkflow'
         doc['checksums'] = 'someChecksums'
         doc['start_time'] = str(datetime.datetime.now())
         doc['end_time'] = str(datetime.datetime.now())
-        doc['dbSource_update'] = str(time.time())
         doc['dbSource_url'] = 'someUrl'
         doc['size'] = 1000
         doc['end_time'] = 10000
         doc['last_update'] = 10000
-        doc['job_end_time'] = str(time.time())
+        doc['job_end_time'] = 10000
         doc['publication_state'] = publication_state
         doc['publication_retry_count'] = []
+        doc['publish_dbs_url'] = 'https://cmsdbsprod.cern.ch:8443/cms_dbs_ph_analysis_02_writer/servlet/DBSServlet'
+        doc['inputdataset'] = '/RelValProdTTbar/JobRobot-MC_3XY_V24_JobRobot-v1/GEN-SIM-DIGI-RECO'
+        doc['dbs_url'] = 'http://cmsdbsprod.cern.ch/cms_dbs_prod_global/servlet/DBSServlet'
         self.db.queue(doc, True)
         self.db.commit()
 
@@ -262,7 +277,7 @@ class AsyncTransfer_t(unittest.TestCase):
         doc = {}
         doc['_id'] = getHashLfn("/this/is/a/lfnA")
         doc['dn'] = "/C=IT/O=INFN/OU=Personal Certificate/L=Perugia/CN=Hassen Riahi"
-        doc['task'] = 'someWorkflow'
+        doc['workflow'] = 'someWorkflow'
         doc['size'] = 999999
         doc['jobid'] = '1'
         doc['lfn'] = '/this/is/a/lfnA'
@@ -277,7 +292,7 @@ str(int(str(datetime.datetime.now()).split(" ")[0].split("-")[2]) - 3))
         doc['end_time'] = str(datetime.datetime.now()).\
 replace(str(datetime.datetime.now()).split(" ")[0].split("-")[2], \
 str(int(str(datetime.datetime.now()).split(" ")[0].split("-")[2]) - 2))
-        doc['dbSource_update'] = str(time.time())
+        doc['job_end_time'] = str(time.time())
         doc['dbSource_url'] = 'someUrl'
         self.db.queue(doc, True)
         self.db.commit()
@@ -475,231 +490,231 @@ WMTaskSpace/cmsRun1/output.root",\
 
         return
 
-#    def testA_BasicTest_testLoadFtscpView(self):
-#        """
-#       _BasicFunctionTest_
-#        Tests the components, by seeing if the AsyncTransfer view load correctly files from couch.
-#        """
-#        doc = self.createTestDocinFilesDB()
-#        query = {'reduce':False,
-#         'key':[doc['user'], doc['group'], doc['role'], doc['destination'], doc['source'], doc['dn']]}
-#        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
-#        assert len(active_files) == 1
-#        for i in range(1, 5):
-#            self.createTestDocinFilesDB()
-#        query = {'reduce':False}
-#        all_active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
-#
-#        assert len(all_active_files) == 5
-#
-#    def testA_BasicTest_testFileTransfer(self):
-#        """
-#        _BasicFunctionTest_
-#        Tests the components, by seeing if they can process documents.
-#        """
-#        self.createFileDocinFilesDB()
-#        Transfer = TransferDaemon(config = self.config)
-#        Transfer.algorithm( )
-#        query = {'reduce':False}
-#        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
-#        query = {'reduce':False}
-#        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
-#
-#        assert ( len(files_acquired) + len(files_new) ) == 1
-#
-#        for i in range(1, 5):
-#            self.createFileDocinFilesDB( str(i) )
-#        query = {'reduce':False}
-#        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
-#        query = {'reduce':False}
-#        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
-#
-#        assert ( len(files_acquired) + len(files_new) ) == 5
-#
-#    def testB_InteractionWithTheSource_testDocumentDuplicationAndThenTransfer(self):
-#        """
-#        _testB_InteractionWithTheSource_testDocumentDuplication_
-#        Tests the components: gets data from DB source and duplicate
-#        them in files_db and see if the component can process them.
-#        """
-#        self.createTestDocinDBSource()
-#        LFNDuplicator = LFNSourceDuplicator(config = self.config)
-#        LFNDuplicator.algorithm( )
-#        time.sleep(10)
-#        query = { 'reduce':False }
-#        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
-#
-#        assert len(active_files) == 1
-#
-#        Transfer = TransferDaemon(config = self.config)
-#        Transfer.algorithm( )
-#        query = {'reduce':False}
-#        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
-#        query = {'reduce':False}
-#        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
-#
-#        assert ( len(files_acquired) + len(files_new) ) == 1
-#
-#        for i in range(1, 5):
-#            self.createTestDocinDBSource( str(i) )
-#        LFNDuplicator_1 = LFNSourceDuplicator(config = self.config)
-#        LFNDuplicator_1.algorithm( )
-#        time.sleep(20)
-#        query = {'reduce':False }
-#        active1_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
-#
-#        assert len(active1_files) == 5
-#
-#        Transfer_1 = TransferDaemon(config = self.config)
-#        Transfer_1.algorithm( )
-#        query = {'reduce':False}
-#        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
-#        query = {'reduce':False}
-#        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
-#
-#        assert ( len(files_acquired) + len(files_new) ) == 5
-#
-#    def testC_StatWork_testDocRemovalFromRuntimeDB(self):
-#        """
-#        _StatWork_BasicFunctionTest_
-#        Test statisticWorker, by seeing if it can remove an expired doc from runtimeDB.
-#        """
-#        doc = self.createTestFileFinishedYesterdayinFilesDB( )
-#        statWorker = StatisticDaemon(config = self.config)
-#        statWorker.algorithm( )
-#        query = {'reduce':False,
-#         'key':[doc['user'], doc['destination'], doc['source'], doc['dn'] ] }
-#        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
-#
-#        assert len(active_files) == 0
-#
-#    def testD_StatWork_testNumberOfDocsPerIteration(self):
-#        """
-#        _StatWork_testNumberOfDocsPerIteration_
-#        Test if the stat daemon creates a new document per iteration
-#        """
-#        self.createTestFileFinishedYesterdayinFilesDB( )
-#        statWorker = StatisticDaemon(config = self.config)
-#        statWorker.algorithm( )
-#        self.createTestFileFinishedYesterdayinFilesDB( )
-#        statWorker = StatisticDaemon(config = self.config)
-#        statWorker.algorithm( )
-#        query = {}
-#        serverRows = self.dbStat.loadView('stat', 'ftservers', query)['rows']
-#
-#        assert len(serverRows) == 2
-#
-#    def testD_InteractionWithTheSource_testUpdateFWJR(self):
-#        """
-#        _testD_InteractionWithTheSource_testUpdateFWJR_
-#        Tests the components: gets data from DB source and duplicate
-#        them in files_db and see if the component can update the fwjr when the transfer is done.
-#        """
-#        self.createTestDocinDBSource()
-#        LFNDuplicator = LFNSourceDuplicator(config = self.config)
-#        LFNDuplicator.algorithm( )
-#        time.sleep(10)
-#        # Run the daemon
-#        Transfer = TransferDaemon(config = self.config)
-#        Transfer.algorithm( )
-#        query = {'reduce':False}
-#        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
-#        # Get files acuired
-#        document = self.db.document(files_acquired[0]['id'])
-#        sites = self.sites
-#        site_tfc_map = {}
-#        for site in sites:
-#            site_tfc_map[site] = get_tfc_rules(site)
-#        # Mark the document as good
-#        worker = TransferWorker([document['user'], None, None], site_tfc_map, self.config.AsyncTransfer)
-#        worker.mark_good([document['lfn']])
-#        query = { 'reduce':False, 'key':[ document['jobid'] , document['dbSource_update'] ] }
-#        result = self.dbSource.loadView('FWJRDump', 'fwjrByJobIDTimestamp', query)['rows']
-#        docSource = self.dbSource.document(result[0]['id'])
-#
-#        assert docSource['fwjr']['steps'].has_key('asyncStageOut1') == True
-#
-#    def testE_FixBug1196_PoolWorkersFromAgent_FunctionTest(self):
-#        """
-#        _BasicPoolWorkers_FunctionTest_
-#        Tests the components, by seeing if it can spawn process
-#        using the multiprocessing without problems
-#        """
-#        myThread = threading.currentThread()
-#        self.createTestDocinFilesDB()
-#        Transfer = AsyncTransferTest(config = self.testConfig)
-#        Transfer.prepareToStart()
-#        # Set sleep time to 3 days and you will reproduce the
-#        # problem described in #1196
-#        time.sleep(30)
-#        myThread.workerThreadManager.terminateWorkers()
-#        while threading.activeCount() > 1:
-#            time.sleep(1)
-#
-#    def testF_TestIfgetHashLfnHashCorrectlyLFNs(self):
-#        """
-#        _testF_TestIfgetHashLfnHashCorrectlyLFNs
-#        Tests if the getHashLfn function of the AsyncStageOut module module hashs correctly LFNs.
-#        """
-#        lfn = "/My/lfn/path"
-#        hashedLfn = getHashLfn(lfn)
-#        assert hashlib.sha224(lfn).hexdigest() == hashedLfn
-#
-#    def testG_PrePostTransferCleaning(self):
-#        """
-#        _testG_PrePostTransferCleaning
-#        Tests if the cleanSpace method removes correctly files.
-#        """
-#        file_doc = self.createTestDocinFilesDB('T2_IT_Rome')
-#        sites = self.sites
-#        site_tfc_map = {}
-#        for site in sites:
-#            site_tfc_map[site] = get_tfc_rules(site)
-#        pfn = apply_tfc('T2_IT_Rome'+':'+file_doc['lfn'], site_tfc_map, 'T2_IT_Rome')
-#        emptyFile = os.getcwd() + '/__init__.py'
-#        command = 'srmcp -debug=true file:///' + emptyFile + ' ' + pfn + ' -2'
-#        log_dir = '%s/logs/%s' % (self.config.AsyncTransfer.componentDir, file_doc['user'])
-#        try:
-#            os.makedirs(log_dir)
-#        except OSError, e:
-#            if e.errno == errno.EEXIST:
-#                pass
-#            else: raise
-#        stdout_log = open('%s/%s.srmcp_out_log' % (log_dir, file_doc['destination']), 'w')
-#        stderr_log = open('%s/%s.srmcp_err_log' % (log_dir, file_doc['destination']), 'w')
-#        proc = subprocess.Popen(
-#                        ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
-#                        stdout=stdout_log,
-#                        stderr=stderr_log,
-#                        stdin=subprocess.PIPE,
-#                            )
-#        proc.stdin.write(command)
-#        stdout, stderr = proc.communicate()
-#        rc = proc.returncode
-#        stdout_log.close()
-#        stderr_log.close()
-#        worker = TransferWorker([file_doc['user'], None, None], site_tfc_map, self.config.AsyncTransfer)
-#        to_clean = {(str(pfn), str(pfn)): 'T2_IT_Rome'}
-#        worker.cleanSpace(to_clean)
-#        commandLs = 'srmls ' + pfn
-#        stdoutls_log = open('%s/%s.srmls_out_log' % (log_dir, 'T2_IT_Rome'), 'w')
-#        stderrls_log = open('%s/%s.srmls_err_log' % (log_dir, 'T2_IT_Rome'), 'w')
-#        procls = subprocess.Popen(
-#                        ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
-#                        stdout=stdoutls_log,
-#                        stderr=stderrls_log,
-#                        stdin=subprocess.PIPE,
-#                            )
-#        procls.stdin.write(commandLs)
-#        stdoutls, stderrls = procls.communicate()
-#        rcls = procls.returncode
-#        stdoutls_log.close()
-#        stderrls_log.close()
-#        assert rcls == 1
-
-    def testE_AnalyticsCompMethods_tests(self):
+    def testA_BasicTest_testLoadFtscpView(self):
         """
-        _testE_AnalyticsCompMethods_tests_
+       _BasicFunctionTest_
+        Tests the components, by seeing if the AsyncTransfer view load correctly files from couch.
+        """
+        doc = self.createTestDocinFilesDB()
+        query = {'reduce':False,
+         'key':[doc['user'], doc['group'], doc['role'], doc['destination'], doc['source'], doc['dn']]}
+        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
+        assert len(active_files) == 1
+        for i in range(1, 5):
+            self.createTestDocinFilesDB()
+        query = {'reduce':False}
+        all_active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
+
+        assert len(all_active_files) == 5
+
+    def testA_BasicTest_testFileTransfer(self):
+        """
+        _BasicFunctionTest_
+        Tests the components, by seeing if they can process documents.
+        """
+        self.createFileDocinFilesDB()
+        Transfer = TransferDaemon(config = self.config)
+        Transfer.algorithm( )
+        query = {'reduce':False}
+        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
+        query = {'reduce':False}
+        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
+
+        assert ( len(files_acquired) + len(files_new) ) == 1
+
+        for i in range(1, 5):
+            self.createFileDocinFilesDB( str(i) )
+        query = {'reduce':False}
+        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
+        query = {'reduce':False}
+        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
+
+        assert ( len(files_acquired) + len(files_new) ) == 5
+
+    def testB_InteractionWithTheSource_testDocumentDuplicationAndThenTransfer(self):
+        """
+        _testB_InteractionWithTheSource_testDocumentDuplication_
+        Tests the components: gets data from DB source and duplicate
+        them in files_db and see if the component can process them.
+        """
+        self.createTestDocinDBSource()
+        LFNDuplicator = LFNSourceDuplicator(config = self.config)
+        LFNDuplicator.algorithm( )
+        time.sleep(10)
+        query = { 'reduce':False }
+        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
+
+        assert len(active_files) == 1
+
+        Transfer = TransferDaemon(config = self.config)
+        Transfer.algorithm( )
+        query = {'reduce':False}
+        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
+        query = {'reduce':False}
+        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
+
+        assert ( len(files_acquired) + len(files_new) ) == 1
+
+        for i in range(1, 5):
+            self.createTestDocinDBSource( str(i) )
+        LFNDuplicator_1 = LFNSourceDuplicator(config = self.config)
+        LFNDuplicator_1.algorithm( )
+        time.sleep(20)
+        query = {'reduce':False }
+        active1_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
+
+        assert len(active1_files) == 5
+
+        Transfer_1 = TransferDaemon(config = self.config)
+        Transfer_1.algorithm( )
+        query = {'reduce':False}
+        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
+        query = {'reduce':False}
+        files_new = self.db.loadView('monitor', 'filesNew', query)['rows']
+
+        assert ( len(files_acquired) + len(files_new) ) == 5
+
+    def testC_StatWork_testDocRemovalFromRuntimeDB(self):
+        """
+        _StatWork_BasicFunctionTest_
+        Test statisticWorker, by seeing if it can remove an expired doc from runtimeDB.
+        """
+        doc = self.createTestFileFinishedYesterdayinFilesDB( )
+        statWorker = StatisticDaemon(config = self.config)
+        statWorker.algorithm( )
+        query = {'reduce':False,
+         'key':[doc['user'], doc['destination'], doc['source'], doc['dn'] ] }
+        active_files = self.db.loadView('AsyncTransfer', 'ftscp', query)['rows']
+
+        assert len(active_files) == 0
+
+    def testD_StatWork_testNumberOfDocsPerIteration(self):
+        """
+        _StatWork_testNumberOfDocsPerIteration_
+        Test if the stat daemon creates a new document per iteration
+        """
+        self.createTestFileFinishedYesterdayinFilesDB( )
+        statWorker = StatisticDaemon(config = self.config)
+        statWorker.algorithm( )
+        self.createTestFileFinishedYesterdayinFilesDB( )
+        statWorker = StatisticDaemon(config = self.config)
+        statWorker.algorithm( )
+        query = {}
+        serverRows = self.dbStat.loadView('stat', 'ftservers', query)['rows']
+
+        assert len(serverRows) == 2
+
+    def testD_InteractionWithTheSource_testUpdateFWJR(self):
+        """
+        _testD_InteractionWithTheSource_testUpdateFWJR_
+        Tests the components: gets data from DB source and duplicate
+        them in files_db and see if the component can update the fwjr when the transfer is done.
+        """
+        self.createTestDocinDBSource()
+        LFNDuplicator = LFNSourceDuplicator(config = self.config)
+        LFNDuplicator.algorithm( )
+        time.sleep(10)
+        # Run the daemon
+        Transfer = TransferDaemon(config = self.config)
+        Transfer.algorithm( )
+        query = {'reduce':False}
+        files_acquired = self.db.loadView('monitor', 'filesAcquired', query)['rows']
+        # Get files acuired
+        document = self.db.document(files_acquired[0]['id'])
+        sites = self.sites
+        site_tfc_map = {}
+        for site in sites:
+            site_tfc_map[site] = get_tfc_rules(site)
+        # Mark the document as good
+        worker = TransferWorker([document['user'], None, None], site_tfc_map, self.config.AsyncTransfer)
+        worker.mark_good([document['lfn']])
+        query = { 'reduce':False, 'key':[ document['jobid'] , document['job_end_time'] ] }
+        result = self.dbSource.loadView('FWJRDump', 'fwjrByJobIDTimestamp', query)['rows']
+        docSource = self.dbSource.document(result[0]['id'])
+
+        assert docSource['fwjr']['steps'].has_key('asyncStageOut1') == True
+
+    def testE_FixBug1196_PoolWorkersFromAgent_FunctionTest(self):
+        """
+        _BasicPoolWorkers_FunctionTest_
+        Tests the components, by seeing if it can spawn process
+        using the multiprocessing without problems
+        """
+        myThread = threading.currentThread()
+        self.createTestDocinFilesDB()
+        Transfer = AsyncTransferTest(config = self.testConfig)
+        Transfer.prepareToStart()
+        # Set sleep time to 3 days and you will reproduce the
+        # problem described in #1196
+        time.sleep(30)
+        myThread.workerThreadManager.terminateWorkers()
+        while threading.activeCount() > 1:
+            time.sleep(1)
+
+    def testF_TestIfgetHashLfnHashCorrectlyLFNs(self):
+        """
+        _testF_TestIfgetHashLfnHashCorrectlyLFNs
+        Tests if the getHashLfn function of the AsyncStageOut module module hashs correctly LFNs.
+        """
+        lfn = "/My/lfn/path"
+        hashedLfn = getHashLfn(lfn)
+        assert hashlib.sha224(lfn).hexdigest() == hashedLfn
+
+    def testG_PrePostTransferCleaning(self):
+        """
+        _testG_PrePostTransferCleaning
+        Tests if the cleanSpace method removes correctly files.
+        """
+        file_doc = self.createTestDocinFilesDB('T2_IT_Rome')
+        sites = self.sites
+        site_tfc_map = {}
+        for site in sites:
+            site_tfc_map[site] = get_tfc_rules(site)
+        pfn = apply_tfc('T2_IT_Rome'+':'+file_doc['lfn'], site_tfc_map, 'T2_IT_Rome')
+        emptyFile = os.getcwd() + '/__init__.py'
+        command = 'srmcp -debug=true file:///' + emptyFile + ' ' + pfn + ' -2'
+        log_dir = '%s/logs/%s' % (self.config.AsyncTransfer.componentDir, file_doc['user'])
+        try:
+            os.makedirs(log_dir)
+        except OSError, e:
+            if e.errno == errno.EEXIST:
+                pass
+            else: raise
+        stdout_log = open('%s/%s.srmcp_out_log' % (log_dir, file_doc['destination']), 'w')
+        stderr_log = open('%s/%s.srmcp_err_log' % (log_dir, file_doc['destination']), 'w')
+        proc = subprocess.Popen(
+                        ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
+                        stdout=stdout_log,
+                        stderr=stderr_log,
+                        stdin=subprocess.PIPE,
+                            )
+        proc.stdin.write(command)
+        stdout, stderr = proc.communicate()
+        rc = proc.returncode
+        stdout_log.close()
+        stderr_log.close()
+        worker = TransferWorker([file_doc['user'], None, None], site_tfc_map, self.config.AsyncTransfer)
+        to_clean = {(str(pfn), str(pfn)): 'T2_IT_Rome'}
+        worker.cleanSpace(to_clean)
+        commandLs = 'srmls ' + pfn
+        stdoutls_log = open('%s/%s.srmls_out_log' % (log_dir, 'T2_IT_Rome'), 'w')
+        stderrls_log = open('%s/%s.srmls_err_log' % (log_dir, 'T2_IT_Rome'), 'w')
+        procls = subprocess.Popen(
+                        ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
+                        stdout=stdoutls_log,
+                        stderr=stderrls_log,
+                        stdin=subprocess.PIPE,
+                            )
+        procls.stdin.write(commandLs)
+        stdoutls, stderrls = procls.communicate()
+        rcls = procls.returncode
+        stdoutls_log.close()
+        stderrls_log.close()
+        assert rcls == 1
+
+    def testH_AnalyticsCompMethods_tests(self):
+        """
+        _testH_AnalyticsCompMethods_tests_
         Tests the Analytics component methods
         """
         self.createFileDocinFilesDB()
@@ -725,6 +740,25 @@ WMTaskSpace/cmsRun1/output.root",\
         state = self.monitoring_db.loadView('UserMonitoring', 'StatesByWorkflow', query)['rows'][0]['value']
         assert state["published"] == 1
 
+    def testI_DBSPublisher_testLoadPublishView(self):
+        """
+        _testI_DBSPublisher_testLoadPublishView_
+        Tests Publish view used by the DBSPublisher to load the files to publish.
+        """
+        doc = self.createFileDocinFilesDB( state = 'done', publication_state = 'not_published' )
+        query = {'reduce':False,
+         'key':[doc['user'], doc['group'], doc['role'], doc['dn'], doc['workflow']]}
+        active_files = self.db.loadView('DBSPublisher', 'publish', query)['rows']
+        assert len(active_files) == 1
+        for i in range(1, 5):
+            self.createFileDocinFilesDB( doc_id = str(i), state = 'done', publication_state = 'not_published' )
+        query = {'reduce':False}
+        all_active_files = self.db.loadView('DBSPublisher', 'publish', query)['rows']
+        assert len(all_active_files) == 5
+        Publisher = PublisherDaemon( config = self.config )
+        Publisher.algorithm( )
+        all_active_files = self.db.loadView('DBSPublisher', 'publish', query)['rows']
+        assert len(all_active_files) == 0
 
 if __name__ == '__main__':
     unittest.main()

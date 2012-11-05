@@ -132,7 +132,9 @@ class PublisherWorker:
             # This will be moved soon
             self.logger.error('Did not get valid proxy. Setting proxy to host cert')
             self.userProxy = config.serviceCert
-        self.ufc = UserFileCache({'endpoint': self.userFileCacheEndpoint})
+        self.ufc = UserFileCache({'endpoint': self.userFileCacheEndpoint,
+                                  'cert': self.userProxy,
+                                  'key': self.userProxy})
         os.environ['X509_USER_PROXY'] = self.userProxy
         self.phedexApi = PhEDEx(responseType='json')
         self.max_files_per_block = self.config.max_files_per_block
@@ -161,7 +163,7 @@ class PublisherWorker:
             # If the number of files < max_files_per_block then check the oldness of the workflow
             if wf['value'] < self.max_files_per_block:
                 wf_jobs_endtime.sort()
-                if (( time.time() - wf_jobs_endtime[len(wf_jobs_endtime) - 1] )/3600) < self.config.workflow_expiration_time:
+                if (( time.time() - wf_jobs_endtime[0] )/3600) < self.config.workflow_expiration_time:
                     continue
             if lfn_ready:
                 try:
@@ -178,7 +180,7 @@ class PublisherWorker:
                 self.mark_failed( failed_files )
                 self.mark_good( good_files )
 
-        self.logger.info('Publications completed')
+        self.logger.info('Publication algorithm completed')
 
     def mark_good(self, files=[]):
         """
@@ -215,7 +217,7 @@ class PublisherWorker:
         last_update = int(time.time())
         for lfn in files:
             data = {}
-            docId = getHashLfn(lfn.replace('store', 'store/temp', 1))
+            docId = getHashLfn(lfn)
             # Load document to get the retry_count
             try:
                 document = self.db.document( docId )
@@ -257,12 +259,12 @@ class PublisherWorker:
           :arg str inputDataset
           :arg str sourceurl
           :return: the publication status or result"""
-        try:
-            toPublish = self.readToPublishFiles(workflow, userhn, lfn_ready)
-        except (tarfile.ReadError, RuntimeError):
-            self.logger.error("Unable to read publication description files. ")
-            return lfn_ready, []
-        if not toPublish: return lfn_ready, []
+        toPublish, fail = self.readToPublishFiles(workflow, userhn, lfn_ready)
+        if not toPublish:
+            if fail:
+                return lfn_ready, []
+            else:
+                return [], []
         self.logger.info("Starting data publication for: " + str(workflow))
         failed, done, dbsResults = self.publishInDBS(userdn=userdn, sourceURL=sourceurl,
                                                      inputDataset=inputDataset, toPublish=toPublish,
@@ -290,8 +292,6 @@ class PublisherWorker:
                 newDict.update({key : value})
             return newDict
 
-        ## TODO need to define what to change to enable the CRABCache access
-        ufc = UserFileCache({'endpoint': self.userFileCacheEndpoint})
         tmpDir = tempfile.mkdtemp()
         toPublish = {}
 
@@ -314,13 +314,20 @@ class PublisherWorker:
                 fail_files, toPublish = self.clean(lfn_ready, toPublish)
                 tgz.close()
             shutil.rmtree(tmpDir, ignore_errors=True)
-        except Exception, ex:
-            msg =  "Error error when reading publication details for %s" %workflow
+        except RuntimeError, ex:
+            msg =  "Error when reading publication details for %s" %workflow
             msg += str(ex)
             msg += str(traceback.format_exc())
             self.logger.error(msg)
+            return {}, False
+        except Exception, ex:
+            msg =  "Unknown error when reading publication details for %s. Failing the publication" %workflow
+            msg += str(ex)
+            msg += str(traceback.format_exc())
+            self.logger.error(msg)
+            return {}, True
         self.logger.debug('to_publish %s' %toPublish)
-        return toPublish
+        return toPublish, False
 
     def clean(self, lfn_ready, toPublish):
         """
@@ -331,6 +338,7 @@ class PublisherWorker:
         files_to_publish = []
         lfn_to_publish = []
         for ready in lfn_ready:
+            done = False
             for datasetPath, files in toPublish.iteritems():
                 new_temp_files = []
                 lfn_dict = {}
@@ -340,8 +348,17 @@ class PublisherWorker:
                         lfn_dict = lfn
                         lfn_dict['lfn'] = lfn['lfn'].replace('store/temp', 'store', 1)
                         new_temp_files.append(lfn_dict)
-                if new_temp_files: new_toPublish[datasetPath] = new_temp_files
-                files_to_publish.extend(lfn_to_publish)
+                        done = True
+                        break
+                if done:
+                    break
+            if new_temp_files:
+                if new_toPublish.has_key(datasetPath):
+                    new_toPublish[datasetPath].extend(new_temp_files)
+                else:
+                    new_toPublish[datasetPath] = new_temp_files
+            files_to_publish.extend(lfn_to_publish)
+
         # Fail files that user does not ask to publish
         fail_files = filter(lambda x: x not in files_to_publish, lfn_ready)
         return fail_files, new_toPublish
@@ -395,7 +412,7 @@ class PublisherWorker:
         results = {}
 
         # Start of publishInDBS
-        blockSize = 100
+        blockSize = self.max_files_per_block
         migrateAPI = DbsMigrateApi(sourceURL, destURL)
         sourceApi = DbsApi({'url' : sourceURL, 'version' : 'DBS_2_0_9', 'mode' : 'POST'})
         destApi   = DbsApi({'url' : destURL,   'version' : 'DBS_2_0_9', 'mode' : 'POST'})
@@ -433,7 +450,7 @@ class PublisherWorker:
                 msg =  "Error when listing files in DBS"
                 msg += str(ex)
                 msg += str(traceback.format_exc())
-                self.logger.error(msg)
+                self.logger.debug(msg)
 
             workToDo = False
 

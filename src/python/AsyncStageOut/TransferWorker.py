@@ -130,7 +130,7 @@ class TransferWorker:
 
         # Set up a factory for loading plugins
         self.factory = WMFactory(self.config.pluginDir, namespace = self.config.pluginDir)
-
+        self.failures_reasons =  {}
 
     def __call__(self):
         """
@@ -140,16 +140,12 @@ class TransferWorker:
         """
         self.logger.debug("Getting files for transfer")
         jobs = self.files_for_transfer()
-        
-        self.logger.debug("Performing transfers")
-        transferred, failed, failed_to_clean = self.command()
+
+        transferred, failed = self.command()
 
         self.logger.debug("Marking transfers good/bad")
         self.mark_failed( failed )
         self.mark_good( transferred )
-
-        self.logger.debug("Cleaning Space")
-        self.cleanSpace(failed_to_clean, True)
 
         self.logger.info('Transfers completed')
         return
@@ -318,7 +314,7 @@ class TransferWorker:
 
         #TODO: improve fix for wrong tfc on sites
         try:
-            if pfn.split(':')[0] != 'srm':
+            if pfn.split(':')[0] != 'srm' and pfn.split(':')[0] != 'gsiftp' :
                 self.logger.error('Broken tfc for file %s at site %s' % (lfn, site))
                 return None
         except IndexError:
@@ -370,7 +366,7 @@ class TransferWorker:
             # TODO: check that the job has a retry count > 0 and only delete files if that is the case
             to_clean = {}
             to_clean[ tuple( copyjob ) ] = link[1]
-            self.cleanSpace( to_clean )
+            self.cleanSpace( to_clean, True )
 
             tmp_copyjob_file = tempfile.NamedTemporaryFile(delete=False)
             tmp_copyjob_file.write('\n'.join(copyjob))
@@ -417,8 +413,6 @@ class TransferWorker:
             self.logger.debug("transferred : %s" % transferred_files)
             self.logger.info("failed : %s" % failed_files)
 
-            failed_to_clean[ tuple(results[1]) ] = link[1]
-
             # Clean up the temp copy job file
             os.unlink( tmp_copyjob_file.name )
 
@@ -427,7 +421,7 @@ class TransferWorker:
             # the ftscp log files to a done folder once parsed, and parsing all files in some
             # work directory.
 
-        return transferred_files, failed_files, failed_to_clean
+        return transferred_files, failed_files
 
     def validate_copyjob(self, copyjob):
         """
@@ -467,6 +461,9 @@ class TransferWorker:
                         transferred_files.append(lfn)
                     else:
                         failed_files.append(lfn)
+
+                if line.split(':')[0].strip() == 'Reason':
+                    self.failures_reasons[lfn] = line.split('Reason:')[1:][0].strip()
 
             except IndexError, ex:
 
@@ -513,7 +510,7 @@ class TransferWorker:
 
             outputPfn = self.apply_tfc_to_lfn( '%s:%s' % ( document['destination'], outputLfn ) )
             pluginSource = self.factory.loadObject(self.config.pluginName, args = [self.config, self.logger], listFlag = True)
-            pluginSource.updateSource({ 'jobid':document['jobid'], 'timestamp':document['dbSource_update'], \
+            pluginSource.updateSource({ 'jobid':document['jobid'], 'timestamp':document['job_end_time'], \
                                         'lfn': outputLfn, 'location': document['destination'], 'pfn': outputPfn, 'checksums': document['checksums'] })
 
         try:
@@ -550,6 +547,7 @@ class TransferWorker:
             # Prepare data to update the document in couch
             if force_fail or len(document['retry_count']) + 1 > self.max_retry:
                 data['state'] = 'failed'
+                data['failure_reason'] = self.failures_reasons[lfn]
                 data['end_time'] = now
             else:
                 data['state'] = 'acquired'

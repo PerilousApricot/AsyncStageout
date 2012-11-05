@@ -2,7 +2,7 @@ function complete_job(doc, req) {
         if ( doc['state'] != 'done' && doc['state'] != 'failed' ) {
                 return false;
         }
-        return true;
+        return false;
 }
 
 function(doc) {
