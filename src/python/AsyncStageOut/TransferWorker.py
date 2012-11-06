@@ -289,8 +289,13 @@ class TransferWorker:
                 new_job = []
                 # take these active files and make a copyjob entry
                 def tfc_map(item):
-                    source_pfn = self.apply_tfc_to_lfn('%s:%s' % (source, item['value']))
-                    destination_pfn = self.apply_tfc_to_lfn('%s:%s' % (destination, item['value'].replace('store/temp', 'store', 1)))
+                    sourceLfn   = item['value'][0]
+                    destLfn     = item['value'][0]
+                    preserveLfn = item['value'][1]
+                    if not preserveLfn:
+                        destLfn = destLfn.replace('store/temp', 'store', 1)
+                    source_pfn  = self.apply_tfc_to_lfn('%s:%s' % (source, sourceLfn))
+                    destination_pfn = self.apply_tfc_to_lfn('%s:%s' % (destination, destLfn))
 
                     new_job.append('%s %s' % (source_pfn, destination_pfn))
 
@@ -491,13 +496,17 @@ class TransferWorker:
                 msg += str(traceback.format_exc())
                 self.logger.error(msg)
 
-            outputLfn = document['lfn'].replace('store/temp', 'store', 1)
+            
+            inputLfn = outputLfn = document['lfn']
+            if not document.get('preserve_lfn', False):
+                outputLfn = outputLfn.replace('store/temp', 'store', 1)
 
             try:
                 data = {}
                 data['end_time'] = now
                 data['state'] = 'done'
-		data['lfn'] = outputLfn
+                data['lfn'] = inputLfn
+                data['dest_lfn'] = outputLfn
                 data['last_update'] = last_update
                 updateUri = "/" + self.db.name + "/_design/AsyncTransfer/_update/updateJobs/" + getHashLfn(lfn)
                 updateUri += "?" + urllib.urlencode(data)
@@ -543,7 +552,13 @@ class TransferWorker:
                 msg += str(traceback.format_exc())
                 self.logger.error(msg)
                 continue
-
+            
+            data['preserve_lfn'] = document.get('preserve_lfn', False)
+            inputLfn = outputLfn = document['lfn']
+            if not document.get('preserve_lfn', False):
+                outputLfn = outputLfn.replace('store/temp', 'store', 1)
+            data['lfn'] = inputLfn
+            data['dest_lfn'] = outputLfn
             # Prepare data to update the document in couch
             if force_fail or len(document['retry_count']) + 1 > self.max_retry:
                 data['state'] = 'failed'
