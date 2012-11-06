@@ -49,7 +49,8 @@ class FakeTransferWorker(TransferWorker):
         self.max_retry = config.max_retry
         # Set up a factory for loading plugins
         self.factory = WMFactory(self.config.pluginDir, namespace = self.config.pluginDir)
-
+        self.failures_reasons = {}
+        
     def command(self):
         """
         For each job the worker has to complete:
@@ -73,10 +74,11 @@ class FakeTransferWorker(TransferWorker):
             self.logger.info("copyjob ok")
 
             for task in copyjob:
-                lfn = '/store' + task.split(' ')[0].split('/store')[1]
+                lfn = str('/store' + task.split(' ')[0].split('/store')[1])
                 if (random.random() < getFailProbability()):
                     failed_files.append( lfn )
+                    self.failures_reasons[lfn] = "FakeTransferWorker Failure"
                 else:
                     transferred_files.append( lfn )
 
-        return transferred_files, failed_files, []
+        return transferred_files, failed_files

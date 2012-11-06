@@ -194,6 +194,7 @@ class AnalyticsDaemon(BaseWorkerThread):
             doc['type'] = 'aso_file'
             doc['workflow'] = file['value']['workflow']
             doc['lfn'] = file['value']['lfn']
+            doc['dest_lfn'] = file['value']['dest_lfn']
             doc['location'] = file['value']['location']
             doc['checksum'] = file['value']['checksum']
             doc['jobid'] = file['value']['jobid']
