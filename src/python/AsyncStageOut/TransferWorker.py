@@ -141,11 +141,11 @@ class TransferWorker:
         self.logger.debug("Getting files for transfer")
         jobs = self.files_for_transfer()
 
-        transferred, failed = self.command()
+        transferred, failed, logfile1 = self.command()
 
         self.logger.debug("Marking transfers good/bad")
-        self.mark_failed( failed )
-        self.mark_good( transferred )
+        self.mark_failed( failed, logfile1 )
+        self.mark_good( transferred, logfile1 )
 
         self.logger.info('Transfers completed')
         return
@@ -177,24 +177,24 @@ class TransferWorker:
                     else:
                         destination_pfn = destination_path
 
-                    logfile = open('%s/%s_%s.lcg-del.log' % ( self.log_dir, to_clean_dict[ task ], str(time.time()) ), 'w')
+                    lcgdel_file = open('%s/%s_%s.lcg-del.log' % ( self.log_dir, to_clean_dict[ task ], str(time.time()) ), 'w')
 
                     command = '%s export X509_USER_PROXY=%s ; source %s ; lcg-del -lv %s'  % \
                               (self.cleanEnvironment, self.userProxy, self.uiSetupScript, destination_pfn)
                     self.logger.debug("Running remove command %s" % command)
-                    self.logger.debug("log file: %s" % logfile.name)
+                    self.logger.debug("log file: %s" % lcgdel_file.name)
 
                     proc = subprocess.Popen(
                             ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
-                            stdout=logfile,
-                            stderr=logfile,
+                            stdout=lcgdel_file,
+                            stderr=lcgdel_file,
                             stdin=subprocess.PIPE,
                     )
                     proc.stdin.write(command)
                     stdout, stderr = proc.communicate()
 
                     rc = proc.returncode
-                    logfile.close()
+                    lcgdel_file.close()
 
 
                     if force_delete:
@@ -314,7 +314,13 @@ class TransferWorker:
         Take a CMS_NAME:lfn string and make a pfn.
         Update pfn_to_lfn_mapping dictionary.
         """
-        site, lfn = tuple(file.split(':'))
+        self.logger.debug('file to split %s' %file)
+        try:
+            site, lfn = tuple(file.split(':'))
+        except Exception, e:
+            self.logger.error('it does not seem to be an lfn %s' %file.split(':'))
+            return None
+
         pfn = self.tfc_map[site].matchLFN('srmv2', lfn)
 
         #TODO: improve fix for wrong tfc on sites
@@ -359,6 +365,7 @@ class TransferWorker:
         failed_files = []
 
         failed_to_clean = {}
+        ftslog_file = None
 
         #Loop through all the jobs for the links we have
         for link, copyjob in jobs.items():
@@ -371,7 +378,7 @@ class TransferWorker:
             # TODO: check that the job has a retry count > 0 and only delete files if that is the case
             to_clean = {}
             to_clean[ tuple( copyjob ) ] = link[1]
-            self.cleanSpace( to_clean, True )
+            self.cleanSpace( to_clean )
 
             tmp_copyjob_file = tempfile.NamedTemporaryFile(delete=False)
             tmp_copyjob_file.write('\n'.join(copyjob))
@@ -379,19 +386,19 @@ class TransferWorker:
 
             fts_server_for_transfer = getFTServer(link[1], 'getRunningFTSserver', self.db, self.logger)
 
-            logfile = open('%s/%s-%s_%s.ftslog' % ( self.log_dir, link[0], link[1], str(time.time()) ), 'w')
+            ftslog_file = open('%s/%s-%s_%s.ftslog' % ( self.log_dir, link[0], link[1], str(time.time()) ), 'w')
 
             self.logger.debug("Running FTSCP command")
             self.logger.debug("FTS server: %s" % fts_server_for_transfer)
             self.logger.debug("link: %s -> %s" % link)
             self.logger.debug("copyjob file: %s" % tmp_copyjob_file.name)
-            self.logger.debug("log file: %s" % logfile.name)
+            self.logger.debug("log file: %s" % ftslog_file.name)
 
             #TODO: Sending stdin/stdout/stderr can cause locks - should write to logfiles instead
             proc = subprocess.Popen(
                             ["/bin/bash"], shell=True, cwd=os.environ['PWD'],
-                            stdout=logfile,
-                            stderr=logfile,
+                            stdout=ftslog_file,
+                            stderr=ftslog_file,
                             stdin=subprocess.PIPE,
                         )
 
@@ -407,16 +414,17 @@ class TransferWorker:
 
             stdout, stderr = proc.communicate()
             rc = proc.returncode
-            logfile.close()
+            ftslog_file.close()
 
             # now populate results by parsing the copy job's log file.
             # results is a tuple of lists, 1st list is transferred files, second is failed
-            results = self.parse_ftscp_results(logfile.name, link[0])
+            results = self.parse_ftscp_results(ftslog_file.name, link[0])
             # Removing lfn from the source if the transfer succeeded else from the destination
             transferred_files.extend( results[0] )
             failed_files.extend( results[1] )
             self.logger.debug("transferred : %s" % transferred_files)
             self.logger.info("failed : %s" % failed_files)
+
 
             # Clean up the temp copy job file
             os.unlink( tmp_copyjob_file.name )
@@ -426,8 +434,10 @@ class TransferWorker:
             # the ftscp log files to a done folder once parsed, and parsing all files in some
             # work directory.
 
-        return transferred_files, failed_files
-
+        if ftslog_file:
+            return transferred_files, failed_files, ftslog_file.name
+        else:
+            return transferred_files, failed_files, ""
     def validate_copyjob(self, copyjob):
         """
         the copyjob file is valid when source pfn and destination pfn are not None.
@@ -446,9 +456,9 @@ class TransferWorker:
         transferred_files = []
         failed_files = []
 
-        logfile = open(ftscp_logfile)
+        ftscp_file = open(ftscp_logfile)
 
-        for line in logfile.readlines():
+        for line in ftscp_file.readlines():
 
             try:
 
@@ -475,11 +485,11 @@ class TransferWorker:
                 self.logger.debug("wrong log file! %s" %ex)
                 pass
 
-        logfile.close()
+        ftscp_file.close()
 
         return (transferred_files, failed_files)
 
-    def mark_good(self, files=[]):
+    def mark_good(self, files=[], good_logfile=None):
         """
         Mark the list of files as tranferred
         """
@@ -500,6 +510,18 @@ class TransferWorker:
             inputLfn = outputLfn = document['lfn']
             if not document.get('preserve_lfn', False):
                 outputLfn = outputLfn.replace('store/temp', 'store', 1)
+            to_attach = file(good_logfile)
+            content = to_attach.read(-1)
+            retval = self.db.addAttachment( document["_id"], document["_rev"], content, to_attach.name.split('/')[ len(to_attach.name.split('/')) - 1 ], "text/plain" )
+
+            if retval.get('ok', False) != True:
+                # Then we have a problem
+                msg = "Adding an attachment to document failed\n"
+                msg += str(retval)
+                msg += "ID: %s, Rev: %s" % (document["_id"], document["_rev"])
+                self.logger.error(msg)
+
+            outputLfn = document['lfn'].replace('store/temp', 'store', 1)
 
             try:
                 data = {}
@@ -530,7 +552,7 @@ class TransferWorker:
             msg += str(traceback.format_exc())
             self.logger.error(msg)
 
-    def mark_failed(self, files=[], force_fail = False ):
+    def mark_failed(self, files=[], bad_logfile=None, force_fail = False ):
         """
         Something failed for these files so increment the retry count
         """
@@ -559,6 +581,18 @@ class TransferWorker:
                 outputLfn = outputLfn.replace('store/temp', 'store', 1)
             data['lfn'] = inputLfn
             data['dest_lfn'] = outputLfn
+
+            to_attach = file(bad_logfile)
+            content = to_attach.read(-1)
+            retval = self.db.addAttachment( document["_id"], document["_rev"], content, to_attach.name.split('/')[ len(to_attach.name.split('/')) - 1 ], "text/plain" )
+
+            if retval.get('ok', False) != True:
+                # Then we have a problem
+                msg = "Adding an attachment to document failed\n"
+                msg += str(retval)
+                msg += "ID: %s, Rev: %s" % (document["_id"], document["_rev"])
+                self.logger.error(msg)
+
             # Prepare data to update the document in couch
             if force_fail or len(document['retry_count']) + 1 > self.max_retry:
                 data['state'] = 'failed'
@@ -594,3 +628,4 @@ class TransferWorker:
         Mark the list of files as acquired
         """
         self.logger('Something called mark_incomplete which should never be called')
+
