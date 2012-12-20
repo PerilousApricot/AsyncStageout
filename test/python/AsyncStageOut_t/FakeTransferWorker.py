@@ -6,7 +6,7 @@ from AsyncStageOut.TransferWorker import TransferWorker
 from WMCore.Database.CMSCouch import CouchServer
 from WMCore.WMFactory import WMFactory
 
-import random, logging
+import random, logging, tempfile
 
 # I think I want this as a module-level global to allow external
 # users (i.e. unittests) to properly change things
@@ -37,7 +37,8 @@ class FakeTransferWorker(TransferWorker):
         self.group = user[1]
         self.role = user[2]
         self.tfc_map = tfc_map
-        self.config = config    
+        self.config = config
+        self.tmpFileReference = []
         server = CouchServer(self.config.couch_instance)
         self.db = server.connectDatabase(self.config.files_database)
         logging.basicConfig(level=config.log_level)
@@ -80,5 +81,8 @@ class FakeTransferWorker(TransferWorker):
                     self.failures_reasons[lfn] = "FakeTransferWorker Failure"
                 else:
                     transferred_files.append( lfn )
+        
+        dummyLog = tempfile.NamedTemporaryFile()
+        self.tmpFileReference.append( dummyLog )
 
-        return transferred_files, failed_files
+        return transferred_files, failed_files, dummyLog.name

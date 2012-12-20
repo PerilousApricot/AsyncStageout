@@ -521,8 +521,6 @@ class TransferWorker:
                 msg += "ID: %s, Rev: %s" % (document["_id"], document["_rev"])
                 self.logger.error(msg)
 
-            outputLfn = document['lfn'].replace('store/temp', 'store', 1)
-
             try:
                 data = {}
                 data['end_time'] = now
